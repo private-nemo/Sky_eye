@@ -142,6 +142,20 @@
   #progress-stats { font-size: 11px; color: var(--muted); line-height: 1.8; }
   #progress-stats span { color: var(--text); font-weight: 600; }
 
+  /* format selector */
+  .fmt-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 8px; border-radius: 6px; cursor: pointer;
+    margin-bottom: 4px; border: 1px solid transparent;
+  }
+  .fmt-row:hover { background: var(--surface2); }
+  .fmt-row.active { background: #0d2140; border-color: var(--accent); }
+  .fmt-row input[type=radio] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+  .fmt-label { font-size: 12px; font-weight: 600; color: var(--text); }
+  .fmt-desc  { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  .fmt-ext   { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+               background: var(--surface2); color: var(--muted); margin-left: auto; flex-shrink: 0; }
+
   /* preview button */
   #preview-btn-wrap { padding: 10px 14px; border-top: 1px solid var(--border); display: none; }
 
@@ -247,6 +261,12 @@
       </button>
     </div>
 
+    <!-- Output format -->
+    <div class="section">
+      <div class="section-title">Output Format</div>
+      <div id="fmt-list"></div>
+    </div>
+
     <!-- Download -->
     <div class="section">
       <button class="btn btn-primary btn-full" id="dl-btn" disabled>▶ Download</button>
@@ -278,7 +298,9 @@
 <script>
 // ── state ─────────────────────────────────────────────────────────────────────
 let sources = [];
+let formats = [];
 let currentSrc = null;
+let selectedFormat = 'loose';
 let destMode = 'ssd';
 let ssdDir = '';
 let sdMounts = [];
@@ -301,6 +323,7 @@ tileLayer = L.tileLayer('/tiles/esri/{z}/{x}/{y}.png', {
 // ── boot ──────────────────────────────────────────────────────────────────────
 async function boot() {
   await loadSources();
+  await loadFormats();
   await loadMounts();
   buildZoomSelects();
   updateEstimate();
@@ -351,6 +374,33 @@ function updateMapLayer() {
     maxZoom: 19,
     errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
   }).addTo(map);
+}
+
+async function loadFormats() {
+  const r = await fetch('/api/formats');
+  formats = await r.json();
+  const container = document.getElementById('fmt-list');
+  formats.forEach((fmt, i) => {
+    const row = document.createElement('div');
+    row.className = 'fmt-row' + (i === 0 ? ' active' : '');
+    row.id = `fmt-row-${fmt.id}`;
+    row.innerHTML =
+      `<input type="radio" name="fmt" value="${fmt.id}" ${i === 0 ? 'checked' : ''}/>` +
+      `<div><div class="fmt-label">${fmt.name}</div>` +
+      `<div class="fmt-desc">${fmt.desc}</div></div>` +
+      `<span class="fmt-ext">${fmt.ext}</span>`;
+    row.addEventListener('click', () => selectFormat(fmt.id));
+    container.appendChild(row);
+  });
+}
+
+function selectFormat(id) {
+  selectedFormat = id;
+  formats.forEach(f => {
+    document.getElementById(`fmt-row-${f.id}`)?.classList.toggle('active', f.id === id);
+    const radio = document.querySelector(`input[name=fmt][value="${f.id}"]`);
+    if (radio) radio.checked = (f.id === id);
+  });
 }
 
 async function loadMounts() {
@@ -580,6 +630,7 @@ async function startDownload() {
     zoom_min: parseInt(document.getElementById('zoom-min').value),
     zoom_max: parseInt(document.getElementById('zoom-max').value),
     dest,
+    format: selectedFormat,
   };
   const r = await fetch('/api/download', {
     method: 'POST',
@@ -626,12 +677,14 @@ function updateProgress(d) {
   const mb  = (d.bytes / 1024 / 1024).toFixed(1);
   const eta = d.eta ? fmtSec(d.eta) : '—';
   const status = d.cancelled ? '⚠ Cancelled' : d.finished ? '✓ Complete' : 'Downloading…';
+  const outPath = d.output_path || d.dest || '';
   document.getElementById('progress-stats').innerHTML =
     `<b>${status}</b><br>` +
     `<span>${d.done.toLocaleString()}</span>/${d.total.toLocaleString()} tiles` +
     (d.skipped ? ` · <span>${d.skipped}</span> skipped` : '') +
     (d.errors  ? ` · <span style="color:var(--red)">${d.errors} errors</span>` : '') +
-    `<br>${mb} MB downloaded · <span>${d.rate}</span> tiles/s<br>ETA: <span>${eta}</span>`;
+    `<br>${mb} MB downloaded · <span>${d.rate}</span> tiles/s · ETA: <span>${eta}</span>` +
+    (outPath ? `<br><span style="color:var(--muted);font-size:10px;word-break:break-all">${outPath}</span>` : '');
 
   if (d.finished || d.cancelled) {
     document.getElementById('cancel-btn').style.display = 'none';
