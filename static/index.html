@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sky Eye Tile Generator</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --surface2: #1c2128;
+    --border:   #30363d;
+    --text:     #c9d1d9;
+    --muted:    #8b949e;
+    --green:    #3fb950;
+    --yellow:   #d29922;
+    --red:      #f85149;
+    --blue:     #58a6ff;
+    --orange:   #e3a45a;
+    --accent:   #1f6feb;
+    --radius:   8px;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; }
+  #app { display: flex; height: 100%; overflow: hidden; }
+
+  /* ── left sidebar ── */
+  #sidebar {
+    width: 310px; min-width: 310px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  #sidebar-header {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #sidebar-header h1 { font-size: 15px; font-weight: 700; color: var(--blue); }
+  #sidebar-header p { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .section-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin-bottom: 8px;
+  }
+
+  label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+  input[type=number], input[type=text], select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; font-size: 13px; margin-bottom: 6px;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  input.err { border-color: var(--red) !important; }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row2 label, .row2 input { width: 100%; margin-bottom: 0; }
+  .row2 > div { display: flex; flex-direction: column; gap: 2px; }
+
+  /* source info card */
+  #src-info {
+    background: var(--surface2); border-radius: 6px;
+    padding: 8px 10px; margin-top: 4px; font-size: 11px; line-height: 1.6;
+  }
+  #src-info .info-row { display: flex; justify-content: space-between; }
+  #src-info .info-val { color: var(--text); font-weight: 600; }
+  #src-warn { color: var(--yellow); font-size: 11px; margin-top: 4px; }
+
+  /* bbox grid */
+  #bbox-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto auto auto; gap: 4px 6px;
+    align-items: center; margin-bottom: 6px;
+  }
+  #bbox-grid label { font-size: 10px; color: var(--muted); text-align: center; margin: 0; }
+  #bbox-grid input { margin: 0; padding: 4px 6px; text-align: center; }
+  .bbox-n { grid-column: 2; }
+  .bbox-w { grid-column: 1; }
+  .bbox-e { grid-column: 3; }
+  .bbox-s { grid-column: 2; }
+
+  /* zoom row */
+  .zoom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .zoom-row > div { display: flex; flex-direction: column; gap: 2px; }
+
+  /* estimate box */
+  #estimate-box {
+    background: var(--surface2); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; line-height: 1.7; margin-top: 4px;
+  }
+  #est-count { font-size: 15px; font-weight: 700; color: var(--blue); }
+  #est-warn  { color: var(--yellow); font-size: 11px; }
+
+  /* destination */
+  .radio-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 8px; border-radius: 6px; cursor: pointer;
+    margin-bottom: 4px; border: 1px solid transparent;
+  }
+  .radio-row:hover { background: var(--surface2); }
+  .radio-row.active { background: #0d2140; border-color: var(--accent); }
+  .radio-row input[type=radio] { margin-top: 2px; accent-color: var(--accent); flex-shrink: 0; }
+  .radio-label { font-size: 12px; font-weight: 600; color: var(--text); }
+  .radio-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .radio-badge {
+    margin-left: auto; font-size: 10px; font-weight: 700;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--surface2); color: var(--muted);
+  }
+  #custom-path-wrap { display: none; margin-top: 4px; }
+
+  /* buttons */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    border: none; cursor: pointer; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary  { background: var(--accent);  color: #fff; }
+  .btn-danger   { background: #6e1717; color: var(--red); border: 1px solid var(--red); }
+  .btn-ghost    { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-full     { width: 100%; }
+
+  /* progress */
+  #progress-wrap { display: none; }
+  #progress-bar-bg {
+    height: 8px; background: var(--surface2); border-radius: 4px;
+    overflow: hidden; margin: 8px 0 6px;
+  }
+  #progress-bar {
+    height: 100%; background: var(--accent); border-radius: 4px;
+    width: 0%; transition: width .4s;
+  }
+  #progress-bar.done   { background: var(--green); }
+  #progress-bar.cancel { background: var(--yellow); }
+  #progress-stats { font-size: 11px; color: var(--muted); line-height: 1.8; }
+  #progress-stats span { color: var(--text); font-weight: 600; }
+
+  /* preview button */
+  #preview-btn-wrap { padding: 10px 14px; border-top: 1px solid var(--border); display: none; }
+
+  /* ── map panel ── */
+  #map-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #map-toolbar {
+    padding: 6px 10px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  #map-mode-label { font-size: 11px; color: var(--muted); }
+  #map { flex: 1; }
+  .leaflet-container { background: #111827; }
+
+  #draw-btn.active { background: #0d3a0d; border-color: var(--green); color: var(--green); }
+
+  /* zoom level selector constraints */
+  select option:disabled { color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── LEFT SIDEBAR ── -->
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h1>👁 Sky Eye Tile Generator</h1>
+      <p>Generate and download offline map tiles by area and zoom</p>
+    </div>
+
+    <!-- Source -->
+    <div class="section">
+      <div class="section-title">Tile Source</div>
+      <select id="src-select"></select>
+      <div id="src-info">
+        <div class="info-row">Resolution <span class="info-val" id="si-res">—</span></div>
+        <div class="info-row">Updated    <span class="info-val" id="si-upd">—</span></div>
+        <div class="info-row">Max zoom   <span class="info-val" id="si-mz">—</span></div>
+        <div class="info-row">License    <span class="info-val" id="si-lic">—</span></div>
+      </div>
+      <div id="src-warn"></div>
+    </div>
+
+    <!-- Bounding box -->
+    <div class="section">
+      <div class="section-title">Bounding Box</div>
+      <div id="bbox-grid">
+        <span></span>
+        <div class="bbox-n"><label>North lat</label><input id="bb-n" type="number" step="0.001" placeholder="49.00"/></div>
+        <span></span>
+        <div class="bbox-w"><label>West lon</label><input id="bb-w" type="number" step="0.001" placeholder="-125.0"/></div>
+        <span style="text-align:center;color:var(--muted);font-size:18px">✛</span>
+        <div class="bbox-e"><label>East lon</label><input id="bb-e" type="number" step="0.001" placeholder="-66.0"/></div>
+        <span></span>
+        <div class="bbox-s"><label>South lat</label><input id="bb-s" type="number" step="0.001" placeholder="24.00"/></div>
+        <span></span>
+      </div>
+      <button class="btn btn-ghost" id="fit-btn" style="width:100%;margin-top:2px">⊡ Fit map to bbox</button>
+    </div>
+
+    <!-- Zoom -->
+    <div class="section">
+      <div class="section-title">Zoom Range</div>
+      <div class="zoom-row">
+        <div><label>Min zoom</label>
+          <select id="zoom-min"></select>
+        </div>
+        <div><label>Max zoom</label>
+          <select id="zoom-max"></select>
+        </div>
+      </div>
+      <div id="estimate-box">
+        <div><span id="est-count">—</span> tiles</div>
+        <div id="est-meta" style="color:var(--muted)">Enter bbox + zoom to estimate</div>
+        <div id="est-warn"></div>
+      </div>
+    </div>
+
+    <!-- Destination -->
+    <div class="section">
+      <div class="section-title">Save To</div>
+      <div id="dest-ssd" class="radio-row active" onclick="selectDest('ssd')">
+        <input type="radio" name="dest" value="ssd" checked/>
+        <div>
+          <div class="radio-label">💾 SSD — Laptop</div>
+          <div class="radio-sub" id="ssd-path">~/tiles/sky_eye</div>
+        </div>
+      </div>
+      <div id="dest-sd" class="radio-row" onclick="selectDest('sd')">
+        <input type="radio" name="dest" value="sd"/>
+        <div>
+          <div class="radio-label">📱 SD Card</div>
+          <div class="radio-sub" id="sd-path">Checking…</div>
+        </div>
+        <span class="radio-badge" id="sd-badge">—</span>
+      </div>
+      <div id="custom-path-wrap">
+        <label>Custom path</label>
+        <input type="text" id="custom-path" placeholder="/path/to/tiles"/>
+      </div>
+      <button class="btn btn-ghost" id="custom-toggle" style="font-size:11px;padding:4px 10px;margin-top:2px">
+        ✎ Custom path…
+      </button>
+    </div>
+
+    <!-- Download -->
+    <div class="section">
+      <button class="btn btn-primary btn-full" id="dl-btn" disabled>▶ Download</button>
+      <div id="progress-wrap" style="margin-top:10px">
+        <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+        <div id="progress-stats"></div>
+        <button class="btn btn-danger btn-full" id="cancel-btn" style="margin-top:8px">■ Cancel</button>
+      </div>
+    </div>
+
+    <!-- Preview button (shown after download) -->
+    <div id="preview-btn-wrap">
+      <button class="btn btn-ghost btn-full" id="preview-btn">👁 Preview downloaded tiles</button>
+    </div>
+
+  </div><!-- /sidebar -->
+
+  <!-- ── MAP PANEL ── -->
+  <div id="map-panel">
+    <div id="map-toolbar">
+      <span id="map-mode-label">Draw bounding box or enter coordinates in the sidebar</span>
+      <button class="btn btn-ghost" id="draw-btn" style="margin-left:auto">✏ Draw BBox</button>
+    </div>
+    <div id="map"></div>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+// ── state ─────────────────────────────────────────────────────────────────────
+let sources = [];
+let currentSrc = null;
+let destMode = 'ssd';
+let ssdDir = '';
+let sdMounts = [];
+let bboxRect = null;
+let tileLayer = null;
+let drawMode = false;
+let drawStart = null;
+let drawTempRect = null;
+let evtSource = null;
+let previewActive = false;
+
+// ── map init ──────────────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([38.5, -96.0], 4);
+tileLayer = L.tileLayer('/tiles/esri/{z}/{x}/{y}.png', {
+  attribution: '© Esri',
+  maxZoom: 19,
+  errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
+}).addTo(map);
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+async function boot() {
+  await loadSources();
+  await loadMounts();
+  buildZoomSelects();
+  updateEstimate();
+}
+
+async function loadSources() {
+  const r = await fetch('/api/sources');
+  sources = await r.json();
+  const sel = document.getElementById('src-select');
+  sources.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => { applySrcInfo(); updateMapLayer(); updateEstimate(); });
+  applySrcInfo();
+}
+
+function applySrcInfo() {
+  const sel = document.getElementById('src-select');
+  currentSrc = sources.find(s => s.id === sel.value);
+  if (!currentSrc) return;
+  document.getElementById('si-res').textContent = currentSrc.resolution;
+  document.getElementById('si-upd').textContent = currentSrc.update_freq;
+  document.getElementById('si-mz').textContent  = currentSrc.max_zoom;
+  document.getElementById('si-lic').textContent = currentSrc.license;
+  const warn = document.getElementById('src-warn');
+  warn.textContent = sel.value === 'osm'
+    ? '⚠ OSM discourages bulk tile downloads. Consider Esri or USGS for large areas.'
+    : '';
+  // Constrain zoom-max to source max_zoom
+  const zmSel = document.getElementById('zoom-max');
+  Array.from(zmSel.options).forEach(o => {
+    o.disabled = parseInt(o.value) > currentSrc.max_zoom;
+  });
+  if (parseInt(zmSel.value) > currentSrc.max_zoom)
+    zmSel.value = String(currentSrc.max_zoom);
+  updateEstimate();
+}
+
+function updateMapLayer() {
+  if (previewActive) return;
+  if (tileLayer) map.removeLayer(tileLayer);
+  const id = document.getElementById('src-select').value;
+  tileLayer = L.tileLayer(`/tiles/${id}/{z}/{x}/{y}.png`, {
+    attribution: (sources.find(s => s.id === id) || {}).attr || '',
+    maxZoom: 19,
+    errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }).addTo(map);
+}
+
+async function loadMounts() {
+  const r = await fetch('/api/mounts');
+  const d = await r.json();
+  ssdDir = d.ssd_dir;
+  document.getElementById('ssd-path').textContent = ssdDir;
+  sdMounts = d.mounts;
+  const sdPath = document.getElementById('sd-path');
+  const sdBadge = document.getElementById('sd-badge');
+  if (sdMounts.length > 0) {
+    sdPath.textContent = sdMounts[0].path;
+    sdBadge.textContent = sdMounts[0].free_gb + ' GB free';
+    sdBadge.style.color = 'var(--green)';
+  } else {
+    sdPath.textContent = 'No SD card detected';
+    sdBadge.textContent = 'Not found';
+    document.getElementById('dest-sd').style.opacity = '0.5';
+  }
+}
+
+// ── zoom selects ──────────────────────────────────────────────────────────────
+function buildZoomSelects() {
+  ['zoom-min', 'zoom-max'].forEach(id => {
+    const sel = document.getElementById(id);
+    for (let z = 0; z <= 19; z++) {
+      const opt = document.createElement('option');
+      opt.value = z;
+      opt.textContent = `Z${z}`;
+      sel.appendChild(opt);
+    }
+  });
+  document.getElementById('zoom-min').value = '0';
+  document.getElementById('zoom-max').value = '8';
+  document.getElementById('zoom-min').addEventListener('change', updateEstimate);
+  document.getElementById('zoom-max').addEventListener('change', updateEstimate);
+}
+
+// ── bbox inputs → map rect ────────────────────────────────────────────────────
+['bb-n','bb-s','bb-w','bb-e'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    updateBboxRect();
+    updateEstimate();
+    checkReady();
+  });
+});
+
+function getBbox() {
+  const n = parseFloat(document.getElementById('bb-n').value);
+  const s = parseFloat(document.getElementById('bb-s').value);
+  const w = parseFloat(document.getElementById('bb-w').value);
+  const e = parseFloat(document.getElementById('bb-e').value);
+  if ([n,s,w,e].some(isNaN)) return null;
+  if (n <= s || e <= w) return null;
+  if (Math.abs(n) > 85 || Math.abs(s) > 85) return null;
+  if (Math.abs(w) > 180 || Math.abs(e) > 180) return null;
+  return { n, s, w, e };
+}
+
+function updateBboxRect() {
+  const bb = getBbox();
+  if (bboxRect) { map.removeLayer(bboxRect); bboxRect = null; }
+  if (!bb) return;
+  bboxRect = L.rectangle([[bb.s, bb.w],[bb.n, bb.e]], {
+    color: '#58a6ff', weight: 2, fillOpacity: 0.08, dashArray: '5 4',
+  }).addTo(map);
+}
+
+function setCoords(s, n, w, e) {
+  document.getElementById('bb-n').value = n.toFixed(4);
+  document.getElementById('bb-s').value = s.toFixed(4);
+  document.getElementById('bb-w').value = w.toFixed(4);
+  document.getElementById('bb-e').value = e.toFixed(4);
+  updateBboxRect();
+  updateEstimate();
+  checkReady();
+}
+
+// ── fit map ───────────────────────────────────────────────────────────────────
+document.getElementById('fit-btn').addEventListener('click', () => {
+  const bb = getBbox();
+  if (!bb) return;
+  map.fitBounds([[bb.s, bb.w],[bb.n, bb.e]], { padding: [20, 20] });
+});
+
+// ── draw bbox on map ──────────────────────────────────────────────────────────
+const drawBtn = document.getElementById('draw-btn');
+drawBtn.addEventListener('click', () => {
+  drawMode = !drawMode;
+  drawBtn.classList.toggle('active', drawMode);
+  map.getContainer().style.cursor = drawMode ? 'crosshair' : '';
+  if (!drawMode) { map.dragging.enable(); drawStart = null; }
+  document.getElementById('map-mode-label').textContent = drawMode
+    ? 'Click and drag on the map to draw a bounding box'
+    : 'Draw bounding box or enter coordinates in the sidebar';
+});
+
+map.on('mousedown', e => {
+  if (!drawMode) return;
+  L.DomEvent.stop(e);
+  map.dragging.disable();
+  drawStart = e.latlng;
+  if (drawTempRect) { map.removeLayer(drawTempRect); drawTempRect = null; }
+});
+
+map.on('mousemove', e => {
+  if (!drawMode || !drawStart) return;
+  const bounds = L.latLngBounds(drawStart, e.latlng);
+  if (drawTempRect) {
+    drawTempRect.setBounds(bounds);
+  } else {
+    drawTempRect = L.rectangle(bounds, {
+      color: '#3fb950', weight: 2, fillOpacity: 0.1, dashArray: '4 3',
+    }).addTo(map);
+  }
+});
+
+map.on('mouseup', e => {
+  if (!drawMode || !drawStart) return;
+  const bounds = L.latLngBounds(drawStart, e.latlng);
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  if (drawTempRect) { map.removeLayer(drawTempRect); drawTempRect = null; }
+  setCoords(sw.lat, ne.lat, sw.lng, ne.lng);
+  drawStart = null;
+  drawMode = false;
+  drawBtn.classList.remove('active');
+  map.dragging.enable();
+  map.getContainer().style.cursor = '';
+  document.getElementById('map-mode-label').textContent =
+    'Draw bounding box or enter coordinates in the sidebar';
+});
+
+// ── estimate ──────────────────────────────────────────────────────────────────
+let estimateTimer = null;
+function updateEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(doEstimate, 300);
+}
+
+async function doEstimate() {
+  const bb = getBbox();
+  if (!bb) {
+    document.getElementById('est-count').textContent = '—';
+    document.getElementById('est-meta').textContent = 'Enter a valid bounding box';
+    document.getElementById('est-warn').textContent = '';
+    return;
+  }
+  const zm = document.getElementById('zoom-min').value;
+  const zx = document.getElementById('zoom-max').value;
+  if (parseInt(zx) < parseInt(zm)) {
+    document.getElementById('est-meta').textContent = 'Max zoom must be ≥ min zoom';
+    return;
+  }
+  try {
+    const q = `lat_min=${bb.s}&lat_max=${bb.n}&lon_min=${bb.w}&lon_max=${bb.e}&zoom_min=${zm}&zoom_max=${zx}`;
+    const r = await fetch('/api/estimate?' + q);
+    const d = await r.json();
+    document.getElementById('est-count').textContent = d.tiles.toLocaleString();
+    const mins = Math.round(d.est_sec / 60);
+    document.getElementById('est-meta').textContent =
+      `~${d.est_mb} MB · ~${mins < 1 ? '<1' : mins} min`;
+    const warn = document.getElementById('est-warn');
+    if (d.tiles > 100000) {
+      warn.textContent = '⚠ Very large — consider narrowing area or reducing max zoom';
+    } else if (d.tiles > 30000) {
+      warn.textContent = '⚠ Large download — this may take a while';
+    } else {
+      warn.textContent = '';
+    }
+    checkReady();
+  } catch(e) {}
+}
+
+// ── destination ───────────────────────────────────────────────────────────────
+function selectDest(mode) {
+  destMode = mode;
+  document.getElementById('dest-ssd').classList.toggle('active', mode === 'ssd');
+  document.getElementById('dest-sd').classList.toggle('active', mode === 'sd');
+  document.getElementById('dest-ssd').querySelector('input').checked = mode === 'ssd';
+  document.getElementById('dest-sd').querySelector('input').checked = mode === 'sd';
+  if (mode === 'sd' && sdMounts.length === 0) {
+    loadMounts();   // re-check if SD was inserted
+  }
+}
+
+document.getElementById('custom-toggle').addEventListener('click', () => {
+  const wrap = document.getElementById('custom-path-wrap');
+  const show = wrap.style.display === 'none';
+  wrap.style.display = show ? 'block' : 'none';
+  document.getElementById('custom-toggle').textContent = show ? '✕ Cancel custom path' : '✎ Custom path…';
+});
+
+function getDestPath() {
+  const custom = document.getElementById('custom-path').value.trim();
+  if (custom) return custom;
+  if (destMode === 'sd') {
+    if (sdMounts.length === 0) return null;
+    return sdMounts[0].path + '/tiles/sky_eye';
+  }
+  return ssdDir;
+}
+
+// ── ready check ───────────────────────────────────────────────────────────────
+function checkReady() {
+  const bb = getBbox();
+  const zm = parseInt(document.getElementById('zoom-min').value);
+  const zx = parseInt(document.getElementById('zoom-max').value);
+  document.getElementById('dl-btn').disabled = !bb || zx < zm;
+}
+
+// ── download ──────────────────────────────────────────────────────────────────
+document.getElementById('dl-btn').addEventListener('click', startDownload);
+document.getElementById('cancel-btn').addEventListener('click', cancelDownload);
+
+async function startDownload() {
+  const bb = getBbox();
+  if (!bb) return;
+  const dest = getDestPath();
+  if (!dest) {
+    alert('No SD card found. Please insert one or use a custom path.');
+    return;
+  }
+  const body = {
+    source: document.getElementById('src-select').value,
+    lat_min: bb.s, lat_max: bb.n, lon_min: bb.w, lon_max: bb.e,
+    zoom_min: parseInt(document.getElementById('zoom-min').value),
+    zoom_max: parseInt(document.getElementById('zoom-max').value),
+    dest,
+  };
+  const r = await fetch('/api/download', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (d.error) { alert('Error: ' + d.error); return; }
+  document.getElementById('dl-btn').disabled = true;
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('preview-btn-wrap').style.display = 'none';
+  startProgressSSE();
+}
+
+async function cancelDownload() {
+  await fetch('/api/download', { method: 'DELETE' });
+  if (evtSource) { evtSource.close(); evtSource = null; }
+}
+
+function startProgressSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/api/progress');
+  evtSource.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.idle) return;
+    updateProgress(d);
+    if (d.finished || d.cancelled) {
+      evtSource.close();
+      evtSource = null;
+      if (d.finished && !d.cancelled) {
+        document.getElementById('preview-btn-wrap').style.display = 'block';
+      }
+    }
+  };
+}
+
+function updateProgress(d) {
+  const processed = d.done + d.skipped + d.errors;
+  const pct = d.total > 0 ? processed / d.total * 100 : 0;
+  const bar = document.getElementById('progress-bar');
+  bar.style.width = pct.toFixed(1) + '%';
+  bar.className = d.cancelled ? 'cancel' : d.finished ? 'done' : '';
+
+  const mb  = (d.bytes / 1024 / 1024).toFixed(1);
+  const eta = d.eta ? fmtSec(d.eta) : '—';
+  const status = d.cancelled ? '⚠ Cancelled' : d.finished ? '✓ Complete' : 'Downloading…';
+  document.getElementById('progress-stats').innerHTML =
+    `<b>${status}</b><br>` +
+    `<span>${d.done.toLocaleString()}</span>/${d.total.toLocaleString()} tiles` +
+    (d.skipped ? ` · <span>${d.skipped}</span> skipped` : '') +
+    (d.errors  ? ` · <span style="color:var(--red)">${d.errors} errors</span>` : '') +
+    `<br>${mb} MB downloaded · <span>${d.rate}</span> tiles/s<br>ETA: <span>${eta}</span>`;
+
+  if (d.finished || d.cancelled) {
+    document.getElementById('cancel-btn').style.display = 'none';
+    document.getElementById('dl-btn').disabled = false;
+  }
+}
+
+function fmtSec(s) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+// ── preview downloaded tiles ──────────────────────────────────────────────────
+document.getElementById('preview-btn').addEventListener('click', () => {
+  previewActive = !previewActive;
+  if (previewActive) {
+    if (tileLayer) map.removeLayer(tileLayer);
+    tileLayer = L.tileLayer('/tiles/preview/{z}/{x}/{y}.png', {
+      attribution: 'Downloaded tiles',
+      maxZoom: 19,
+      errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    }).addTo(map);
+    document.getElementById('preview-btn').textContent = '✕ Exit preview';
+    document.getElementById('map-mode-label').textContent = 'Previewing downloaded tiles (grey = not downloaded)';
+    const bb = getBbox();
+    if (bb) map.fitBounds([[bb.s, bb.w],[bb.n, bb.e]], { padding: [20, 20] });
+  } else {
+    previewActive = false;
+    document.getElementById('preview-btn').textContent = '👁 Preview downloaded tiles';
+    document.getElementById('map-mode-label').textContent =
+      'Draw bounding box or enter coordinates in the sidebar';
+    updateMapLayer();
+  }
+});
+
+// ── init ──────────────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>

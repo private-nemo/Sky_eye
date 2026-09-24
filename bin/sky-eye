@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Sky Eye Tile Generator launcher
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "$SCRIPT_DIR/sky_eye.py" "$@"

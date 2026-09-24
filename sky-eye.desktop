@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sky Eye Tile Generator
+Comment=Generate and download offline map tiles from satellite imagery sources
+Exec=/home/ryan/desktop/sky_eye/bin/sky-eye
+Icon=applications-internet
+Terminal=false
+Categories=Utility;Geography;
+StartupNotify=true
