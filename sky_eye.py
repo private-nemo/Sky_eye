@@ -11,6 +11,7 @@ import mimetypes
 import os
 import signal
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -172,6 +173,116 @@ def find_removable_mounts() -> list[dict]:
 FMT_LOOSE    = "loose"     # z/x/y.png directory tree  — Dragon GUI / any Leaflet app
 FMT_MBTILES  = "mbtiles"   # .mbtiles SQLite            — ATAK, WinTAK, QGIS, Mapbox
 FMT_ATAK_ZIP = "atak_zip"  # .zip bundle with manifest  — direct ATAK sideload
+FMT_JNX      = "jnx"       # Garmin BirdsEye raster     — Garmin handhelds (Montana, GPSMAP, Oregon…)
+
+JNX_MAX_LEVELS = 5  # Garmin supports up to 5 zoom levels per JNX file
+
+
+def _tile_to_jnx_bbox(z: int, x: int, y: int) -> tuple[float, float, float, float]:
+    """Return (lat_max, lon_min, lat_min, lon_max) in radians for a slippy tile."""
+    n = 2 ** z
+    lon_min = (x / n) * 2 * math.pi - math.pi
+    lon_max = ((x + 1) / n) * 2 * math.pi - math.pi
+    lat_max = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
+    lat_min = math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n)))
+    return lat_max, lon_min, lat_min, lon_max
+
+
+def _zoom_to_jnx_scale(zoom: int) -> int:
+    return max(1, 2 ** (31 - max(0, zoom)))
+
+
+class JnxWriter:
+    """Buffers JPEG tiles per zoom level then writes one or more JNX files on close()."""
+
+    HEADER_SIZE    = 72
+    LEVEL_DESC_SZ  = 32
+    TILE_RECORD_SZ = 40
+
+    def __init__(self, base_path: str, source: str, zoom_min: int, zoom_max: int) -> None:
+        self.base_path = base_path
+        self.source = source
+        self.zooms = list(range(zoom_min, zoom_max + 1))
+        self.tiles: dict[int, list[tuple]] = {z: [] for z in self.zooms}
+
+    def add_tile(self, z: int, x: int, y: int, jpeg_data: bytes) -> None:
+        bbox = _tile_to_jnx_bbox(z, x, y)
+        self.tiles[z].append((*bbox, jpeg_data))
+
+    def write(self) -> list[str]:
+        """Write file(s), return list of paths written."""
+        paths = []
+        groups = [self.zooms[i:i + JNX_MAX_LEVELS]
+                  for i in range(0, len(self.zooms), JNX_MAX_LEVELS)]
+        for grp in groups:
+            if len(groups) > 1:
+                path = self.base_path.replace(".jnx", f"_z{grp[0]}-{grp[-1]}.jnx")
+            else:
+                path = self.base_path
+            written = self._write_one(path, grp)
+            if written:
+                paths.append(path)
+        return paths
+
+    def _write_one(self, path: str, zooms: list[int]) -> bool:
+        tile_counts = [len(self.tiles[z]) for z in zooms]
+        if sum(tile_counts) == 0:
+            return False
+
+        # Overall bbox in radians
+        all_lats_max, all_lons_min, all_lats_min, all_lons_max = [], [], [], []
+        for z in zooms:
+            for lat_max, lon_min, lat_min, lon_max, _ in self.tiles[z]:
+                all_lats_max.append(lat_max); all_lons_min.append(lon_min)
+                all_lats_min.append(lat_min); all_lons_max.append(lon_max)
+        bb_lat_max = max(all_lats_max); bb_lon_min = min(all_lons_min)
+        bb_lat_min = min(all_lats_min); bb_lon_max = max(all_lons_max)
+
+        num_levels = len(zooms)
+        src_name = TILE_SOURCES.get(self.source, {}).get("name", "Sky Eye")
+        product_id = src_name[:19].encode("ascii", "replace").ljust(20, b"\x00")
+
+        # File header (72 bytes)
+        hdr = struct.pack("<ii", 3, 0)
+        hdr += struct.pack("<dddd", bb_lat_max, bb_lon_min, bb_lat_min, bb_lon_max)
+        hdr += struct.pack("<ii", num_levels, 0)
+        hdr += product_id
+        hdr += struct.pack("<i", 0)  # serial 0 — no BirdsEye subscription required
+
+        # Compute tile-index offsets
+        tile_idx_offsets = []
+        off = self.HEADER_SIZE + num_levels * self.LEVEL_DESC_SZ
+        for cnt in tile_counts:
+            tile_idx_offsets.append(off)
+            off += cnt * self.TILE_RECORD_SZ
+
+        # Level descriptors (32 bytes each: count, offset, scale, description[20])
+        level_descs = b""
+        for i, z in enumerate(zooms):
+            desc = f"Zoom {z}".encode()[:19].ljust(20, b"\x00")
+            level_descs += struct.pack("<iii", tile_counts[i], tile_idx_offsets[i],
+                                       _zoom_to_jnx_scale(z))
+            level_descs += desc
+
+        # Tile indexes + tile data
+        tile_indexes = [b"" for _ in zooms]
+        tile_data_buf = b""
+        data_off = off  # first byte after all tile indexes
+        for i, z in enumerate(zooms):
+            for lat_max, lon_min, lat_min, lon_max, jpeg in self.tiles[z]:
+                tile_indexes[i] += struct.pack("<dddd", lat_max, lon_min, lat_min, lon_max)
+                tile_indexes[i] += struct.pack("<II", data_off, len(jpeg))
+                tile_data_buf += jpeg
+                data_off += len(jpeg)
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(hdr)
+            f.write(level_descs)
+            for idx in tile_indexes:
+                f.write(idx)
+            f.write(tile_data_buf)
+        return True
 
 
 class DownloadJob:
@@ -341,12 +452,18 @@ class DownloadJob:
         # Initialise output based on format
         db_conn: sqlite3.Connection | None = None
         zf: zipfile.ZipFile | None = None
+        jnx: JnxWriter | None = None
         db_commit_counter = 0
 
         if self.output_format == FMT_MBTILES:
             db_conn, self._output_path = self._init_mbtiles()
         elif self.output_format == FMT_ATAK_ZIP:
             zf, self._output_path = self._init_atak_zip()
+        elif self.output_format == FMT_JNX:
+            self.dest_dir.mkdir(parents=True, exist_ok=True)
+            jnx_path = str(self.dest_dir / f"{self.source}_z{self.zoom_min}-{self.zoom_max}.jnx")
+            jnx = JnxWriter(jnx_path, self.source, self.zoom_min, self.zoom_max)
+            self._output_path = jnx_path
         else:
             self._output_path = str(self.dest_dir)
 
@@ -390,6 +507,16 @@ class DownloadJob:
                             db_commit_counter = 0
                     elif zf is not None:
                         zf.writestr(f"tiles/{z}/{x}/{y}.png", data)
+                    elif jnx is not None:
+                        # JNX requires JPEG; convert PNG → JPEG via Pillow
+                        if _PILLOW:
+                            try:
+                                img = Image.open(io.BytesIO(data)).convert("RGB")
+                                buf = io.BytesIO()
+                                img.save(buf, format="JPEG", quality=85)
+                                jnx.add_tile(z, x, y, buf.getvalue())
+                            except Exception:
+                                pass
                     with self._lock:
                         self._done += 1
                         self._bytes += len(data)
@@ -405,6 +532,8 @@ class DownloadJob:
                 db_conn.close()
             if zf:
                 zf.close()
+            if jnx:
+                jnx.write()
 
         self._finished = True
 
@@ -505,6 +634,11 @@ class Handler(BaseHTTPRequestHandler):
                  "name": "ATAK Data Package  (.zip)",
                  "desc": "Zipped tile bundle with bundle.xml manifest — sideload directly into ATAK or WinTAK",
                  "ext": ".zip"},
+                {"id": FMT_JNX,
+                 "name": "Garmin BirdsEye  (.jnx)",
+                 "desc": "Garmin raster imagery — copy to Garmin/BirdsEye/ on your device's SD card. Requires Pillow.",
+                 "ext": ".jnx",
+                 "needs_pillow": True},
             ])
             return
 
@@ -620,6 +754,9 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             try:
+                if body.get("format") == FMT_JNX and not _PILLOW:
+                    self.send_json({"error": "JNX export requires Pillow. Run: pip install Pillow"}, 400)
+                    return
                 job = DownloadJob(
                     source=body["source"],
                     lat_min=float(body["lat_min"]),

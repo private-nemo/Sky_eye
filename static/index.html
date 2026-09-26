@@ -411,10 +411,13 @@ async function loadFormats() {
     const row = document.createElement('div');
     row.className = 'fmt-row' + (i === 0 ? ' active' : '');
     row.id = `fmt-row-${fmt.id}`;
+    const pillow_note = fmt.needs_pillow
+      ? `<div style="font-size:10px;color:var(--yellow);margin-top:2px">⚠ Requires Pillow (<code>pip install Pillow</code>)</div>`
+      : '';
     row.innerHTML =
       `<input type="radio" name="fmt" value="${fmt.id}" ${i === 0 ? 'checked' : ''}/>` +
       `<div><div class="fmt-label">${fmt.name}</div>` +
-      `<div class="fmt-desc">${fmt.desc}</div></div>` +
+      `<div class="fmt-desc">${fmt.desc}</div>${pillow_note}</div>` +
       `<span class="fmt-ext">${fmt.ext}</span>`;
     row.addEventListener('click', () => selectFormat(fmt.id));
     container.appendChild(row);
