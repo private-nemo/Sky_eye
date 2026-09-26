@@ -1,4 +1,10 @@
-"""Sky Eye Android — Kivy shell that boots the Flask-less HTTP server and shows a WebView."""
+"""Sky Eye Android — Kivy shell that boots the HTTP server and shows a WebView.
+
+Storage priority:
+  1. USB OTG SD card  (secondary external storage, detected via getExternalFilesDirs)
+  2. Primary external storage  (/sdcard)
+  3. App-internal fallback
+"""
 
 from __future__ import annotations
 
@@ -14,11 +20,18 @@ from kivy.uix.label import Label
 # ── Android detection ─────────────────────────────────────────────────────────
 try:
     from android.runnable import run_on_ui_thread          # type: ignore
+    from android.permissions import (                      # type: ignore
+        request_permissions, check_permission, Permission,
+    )
     from jnius import autoclass                             # type: ignore
     _PythonActivity  = autoclass("org.kivy.android.PythonActivity")
     _WebView         = autoclass("android.webkit.WebView")
     _WebViewClient   = autoclass("android.webkit.WebViewClient")
-    _WebSettings     = autoclass("android.webkit.WebSettings")
+    _Environment     = autoclass("android.os.Environment")
+    _Build           = autoclass("android.os.Build")
+    _Settings        = autoclass("android.provider.Settings")
+    _Intent          = autoclass("android.content.Intent")
+    _Uri             = autoclass("android.net.Uri")
     ANDROID = True
 except Exception:
     ANDROID = False
@@ -26,30 +39,97 @@ except Exception:
 PORT = 8091
 
 # ── path setup ────────────────────────────────────────────────────────────────
-# sky_eye.py lives one directory up from this file in the source tree.
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE   = os.path.dirname(os.path.abspath(__file__))
 _PARENT = os.path.dirname(_HERE)
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
 
-def _tile_root() -> str:
-    """Return a writable tile directory appropriate for the platform."""
-    if ANDROID:
-        # Kivy sets ANDROID_APP_PATH at runtime; fall back to internal storage.
-        base = os.environ.get("ANDROID_APP_PATH", "/sdcard/sky_eye")
-        return os.path.join(base, "tiles")
-    return os.path.join(os.path.expanduser("~"), "tiles", "sky_eye")
+# ── storage detection ─────────────────────────────────────────────────────────
+
+def _find_tile_root() -> str:
+    """
+    Return the best available writable path for tile storage.
+
+    On Android we walk getExternalFilesDirs(null): index 0 is the built-in
+    /sdcard, index 1+ are removable volumes — the first of those is the
+    USB OTG SD card when one is mounted.
+    """
+    if not ANDROID:
+        return os.path.join(os.path.expanduser("~"), "tiles", "sky_eye")
+
+    try:
+        activity = _PythonActivity.mActivity
+        dirs = activity.getExternalFilesDirs(None)
+        # dirs[0] = primary (internal SD), dirs[1+] = removable (OTG / microSD slot)
+        for i in range(1, len(dirs)):          # prefer removable first
+            d = dirs[i]
+            if d is not None and d.canWrite():
+                path = d.getAbsolutePath()
+                # Walk up to the volume root rather than the app-private subdir
+                # .../Android/data/org.privatenemo.skyeye/files → volume root
+                root = path.split("/Android/data/")[0] if "/Android/data/" in path else path
+                tile_path = os.path.join(root, "sky_eye", "tiles")
+                print(f"[sky_eye] USB OTG storage found: {tile_path}")
+                return tile_path
+    except Exception as e:
+        print(f"[sky_eye] OTG detection error: {e}")
+
+    # Fallback: primary external (/sdcard)
+    try:
+        ext = _Environment.getExternalStorageDirectory().getAbsolutePath()
+        return os.path.join(ext, "sky_eye", "tiles")
+    except Exception:
+        pass
+
+    return "/sdcard/sky_eye/tiles"
 
 
-def _start_server() -> None:
-    """Boot the Sky Eye HTTP server in a daemon thread."""
+# ── permission handling ───────────────────────────────────────────────────────
+
+def _request_all_storage_perms() -> None:
+    """
+    Request storage permissions at runtime.
+
+    Android 11+ (API 30+): MANAGE_EXTERNAL_STORAGE is required for full
+    removable-storage access (USB OTG). We send the user to the system
+    Settings page if it hasn't been granted yet — same approach used in
+    the nRF Connect APK rebuild.
+
+    Android ≤ 10: READ/WRITE_EXTERNAL_STORAGE is sufficient; we also set
+    requestLegacyExternalStorage in the manifest (buildozer.spec) for API 29.
+    """
+    if not ANDROID:
+        return
+
+    # Always request classic storage permissions (needed for API ≤ 32)
+    request_permissions([
+        Permission.READ_EXTERNAL_STORAGE,
+        Permission.WRITE_EXTERNAL_STORAGE,
+    ])
+
+    # On API 30+ also request MANAGE_EXTERNAL_STORAGE via Settings intent
+    try:
+        if _Build.VERSION.SDK_INT >= 30:
+            if not _Environment.isExternalStorageManager():
+                print("[sky_eye] Requesting MANAGE_EXTERNAL_STORAGE via Settings…")
+                activity = _PythonActivity.mActivity
+                intent = _Intent(_Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                uri = _Uri.fromParts("package", activity.getPackageName(), None)
+                intent.setData(uri)
+                activity.startActivity(intent)
+    except Exception as e:
+        print(f"[sky_eye] MANAGE_EXTERNAL_STORAGE request failed: {e}")
+
+
+# ── Flask-less HTTP server ────────────────────────────────────────────────────
+
+def _start_server(tile_root: str) -> None:
     from http.server import ThreadingHTTPServer
-    # Import Handler after path is set up
     import sky_eye as se                       # noqa: PLC0415
-    se.Handler.ssd_dir = se.Path(_tile_root())
+    se.Handler.ssd_dir = se.Path(tile_root)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), se.Handler)
-    print(f"[sky_eye] server up on port {PORT}")
+    print(f"[sky_eye] server up → tiles at {tile_root}")
     server.serve_forever()
 
 
@@ -67,12 +147,18 @@ class SkyEyeAndroid(App):
         )
         self._layout.add_widget(self._status)
 
-        # Start HTTP server
-        t = threading.Thread(target=_start_server, daemon=True)
-        t.start()
+        # Request storage permissions immediately on launch
+        _request_all_storage_perms()
 
-        # Give the server a moment, then open the UI
-        Clock.schedule_once(self._open_ui, 1.8)
+        # Determine tile root (OTG SD card preferred)
+        tile_root = _find_tile_root()
+        self._status.text = f"Tiles → {tile_root}\nStarting server…"
+
+        # Boot the HTTP server in a daemon thread
+        threading.Thread(target=_start_server, args=(tile_root,), daemon=True).start()
+
+        # Open the UI after the server has had time to bind
+        Clock.schedule_once(self._open_ui, 2.0)
         return self._layout
 
     def _open_ui(self, _dt):
@@ -85,8 +171,8 @@ class SkyEyeAndroid(App):
             self._status.text = f"Sky Eye running at {url}"
 
     @staticmethod
+    @run_on_ui_thread
     def _load_webview(url: str) -> None:
-        """Replace the activity content view with a full-screen WebView."""
         try:
             activity = _PythonActivity.mActivity
             wv = _WebView(activity)
