@@ -199,7 +199,7 @@
       <p>Generate and download offline map tiles by area and zoom</p>
     </div>
 
-    <!-- Source -->
+    <!-- Source + Overlays -->
     <div class="section">
       <div class="section-title">Tile Source</div>
       <select id="src-select"></select>
@@ -210,6 +210,10 @@
         <div class="info-row">License    <span class="info-val" id="si-lic">—</span></div>
       </div>
       <div id="src-warn"></div>
+      <div style="height:10px"></div>
+      <div class="section-title">Overlay Layers</div>
+      <div id="ov-list"></div>
+      <div id="overlay-warn">⚠ Pillow not installed — overlay will be skipped at download time. Install with <code>pip install Pillow</code>.</div>
     </div>
 
     <!-- Bounding box -->
@@ -272,13 +276,6 @@
       <button class="btn btn-ghost" id="custom-toggle" style="font-size:11px;padding:4px 10px;margin-top:2px">
         ✎ Custom path…
       </button>
-    </div>
-
-    <!-- Overlay -->
-    <div class="section">
-      <div class="section-title">Overlay Layer</div>
-      <div id="ov-list"></div>
-      <div id="overlay-warn">⚠ Pillow not installed — overlay will be skipped at download time. Install with <code>pip install Pillow</code>.</div>
     </div>
 
     <!-- Output format -->
