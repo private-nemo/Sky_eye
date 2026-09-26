@@ -142,6 +142,19 @@
   #progress-stats { font-size: 11px; color: var(--muted); line-height: 1.8; }
   #progress-stats span { color: var(--text); font-weight: 600; }
 
+  /* overlay selector */
+  .ov-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 8px; border-radius: 6px; cursor: pointer;
+    margin-bottom: 4px; border: 1px solid transparent;
+  }
+  .ov-row:hover { background: var(--surface2); }
+  .ov-row.active { background: #0d2140; border-color: var(--accent); }
+  .ov-row input[type=radio] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+  .ov-label { font-size: 12px; font-weight: 600; color: var(--text); }
+  .ov-desc  { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  #overlay-warn { color: var(--yellow); font-size: 11px; margin-top: 4px; display: none; }
+
   /* format selector */
   .fmt-row {
     display: flex; align-items: flex-start; gap: 8px;
@@ -261,6 +274,13 @@
       </button>
     </div>
 
+    <!-- Overlay -->
+    <div class="section">
+      <div class="section-title">Overlay Layer</div>
+      <div id="ov-list"></div>
+      <div id="overlay-warn">⚠ Pillow not installed — overlay will be skipped at download time. Install with <code>pip install Pillow</code>.</div>
+    </div>
+
     <!-- Output format -->
     <div class="section">
       <div class="section-title">Output Format</div>
@@ -299,13 +319,16 @@
 // ── state ─────────────────────────────────────────────────────────────────────
 let sources = [];
 let formats = [];
+let overlays = [];
 let currentSrc = null;
 let selectedFormat = 'loose';
+let selectedOverlay = 'none';
 let destMode = 'ssd';
 let ssdDir = '';
 let sdMounts = [];
 let bboxRect = null;
 let tileLayer = null;
+let overlayLayer = null;
 let drawMode = false;
 let drawStart = null;
 let drawTempRect = null;
@@ -324,6 +347,7 @@ tileLayer = L.tileLayer('/tiles/esri/{z}/{x}/{y}.png', {
 async function boot() {
   await loadSources();
   await loadFormats();
+  await loadOverlays();
   await loadMounts();
   buildZoomSelects();
   updateEstimate();
@@ -368,12 +392,14 @@ function applySrcInfo() {
 function updateMapLayer() {
   if (previewActive) return;
   if (tileLayer) map.removeLayer(tileLayer);
+  if (overlayLayer) { map.removeLayer(overlayLayer); overlayLayer = null; }
   const id = document.getElementById('src-select').value;
   tileLayer = L.tileLayer(`/tiles/${id}/{z}/{x}/{y}.png`, {
     attribution: (sources.find(s => s.id === id) || {}).attr || '',
     maxZoom: 19,
     errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
   }).addTo(map);
+  updateOverlayLayer();
 }
 
 async function loadFormats() {
@@ -401,6 +427,47 @@ function selectFormat(id) {
     const radio = document.querySelector(`input[name=fmt][value="${f.id}"]`);
     if (radio) radio.checked = (f.id === id);
   });
+}
+
+async function loadOverlays() {
+  const r = await fetch('/api/overlays');
+  overlays = await r.json();
+  const container = document.getElementById('ov-list');
+  overlays.forEach((ov, i) => {
+    const row = document.createElement('div');
+    row.className = 'ov-row' + (i === 0 ? ' active' : '');
+    row.id = `ov-row-${ov.id}`;
+    row.innerHTML =
+      `<input type="radio" name="overlay" value="${ov.id}" ${i === 0 ? 'checked' : ''}/>` +
+      `<div><div class="ov-label">${ov.name}</div>` +
+      `<div class="ov-desc">${ov.desc}</div></div>`;
+    row.addEventListener('click', () => selectOverlay(ov.id));
+    container.appendChild(row);
+  });
+}
+
+function selectOverlay(id) {
+  selectedOverlay = id;
+  overlays.forEach(ov => {
+    document.getElementById(`ov-row-${ov.id}`)?.classList.toggle('active', ov.id === id);
+    const radio = document.querySelector(`input[name=overlay][value="${ov.id}"]`);
+    if (radio) radio.checked = (ov.id === id);
+  });
+  updateOverlayLayer();
+}
+
+function updateOverlayLayer() {
+  if (overlayLayer) { map.removeLayer(overlayLayer); overlayLayer = null; }
+  if (selectedOverlay === 'none' || previewActive) return;
+  const ov = overlays.find(o => o.id === selectedOverlay);
+  if (!ov) return;
+  const opacity = ov.blend === 'transparent' ? 1.0 : 0.5;
+  overlayLayer = L.tileLayer(`/overlay/${selectedOverlay}/{z}/{x}/{y}.png`, {
+    attribution: '',
+    maxZoom: ov.max_zoom || 19,
+    opacity,
+    errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }).addTo(map);
 }
 
 async function loadMounts() {
@@ -680,6 +747,7 @@ async function startDownload() {
     zoom_max: parseInt(document.getElementById('zoom-max').value),
     dest,
     format: selectedFormat,
+    overlay: selectedOverlay !== 'none' ? selectedOverlay : null,
   };
   const r = await fetch('/api/download', {
     method: 'POST',

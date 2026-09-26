@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import mimetypes
@@ -18,6 +19,12 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+try:
+    from PIL import Image
+    _PILLOW = True
+except ImportError:
+    _PILLOW = False
 
 # ── tile source registry ──────────────────────────────────────────────────────
 
@@ -40,6 +47,15 @@ TILE_SOURCES: dict[str, dict] = {
         "max_zoom": 16,
         "license": "Public domain (US Gov)",
     },
+    "noaa": {
+        "name": "NOAA Nautical Charts (US)",
+        "url": "https://tileservice.charts.noaa.gov/tiles/50000_1/{z}/{x}/{y}.png",
+        "attr": "NOAA, Office of Coast Survey",
+        "resolution": "Official nautical charts",
+        "update_freq": "Periodic",
+        "max_zoom": 17,
+        "license": "Public domain (US Gov)",
+    },
     "osm": {
         "name": "OpenStreetMap",
         "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -48,6 +64,27 @@ TILE_SOURCES: dict[str, dict] = {
         "update_freq": "Continuous",
         "max_zoom": 19,
         "license": "ODbL — bulk download discouraged",
+    },
+}
+
+# ── overlay source registry ───────────────────────────────────────────────────
+
+OVERLAY_SOURCES: dict[str, dict] = {
+    "openseamap": {
+        "name": "OpenSeaMap (Nautical Marks)",
+        "url": "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+        "attr": "© OpenSeaMap contributors",
+        "desc": "Buoys, lights, wrecks, depth contours, shipping lanes — global",
+        "blend": "transparent",
+        "max_zoom": 18,
+    },
+    "osm_streets": {
+        "name": "OSM Street Names & Roads",
+        "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "attr": "© OpenStreetMap contributors",
+        "desc": "Road network and place labels blended over base imagery",
+        "blend": "50pct",
+        "max_zoom": 19,
     },
 }
 
@@ -119,10 +156,12 @@ class DownloadJob:
                  zoom_min: int, zoom_max: int,
                  dest_dir: str | Path,
                  output_format: str = FMT_LOOSE,
+                 overlay: str | None = None,
                  rate_delay: float = 0.05) -> None:
         self.source = source
         self.dest_dir = Path(dest_dir)
         self.output_format = output_format
+        self.overlay = overlay if overlay and overlay in OVERLAY_SOURCES else None
         self.zoom_min = zoom_min
         self.zoom_max = zoom_max
         self.rate_delay = rate_delay
@@ -171,6 +210,39 @@ class DownloadJob:
                 "output_path": self._output_path,
                 "format": self.output_format,
             }
+
+    # ── overlay compositing ───────────────────────────────────────────────────
+
+    def _composite(self, base_data: bytes, z: int, x: int, y: int) -> bytes:
+        """Fetch overlay tile and composite it onto base_data. Returns composited PNG bytes."""
+        if not _PILLOW or not self.overlay:
+            return base_data
+        ov_cfg = OVERLAY_SOURCES[self.overlay]
+        url = ov_cfg["url"].format(z=z, x=x, y=y)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                ov_data = r.read()
+        except Exception:
+            return base_data
+        try:
+            base_img = Image.open(io.BytesIO(base_data)).convert("RGBA")
+            ov_img   = Image.open(io.BytesIO(ov_data)).convert("RGBA")
+            if ov_img.size != base_img.size:
+                ov_img = ov_img.resize(base_img.size, Image.LANCZOS)
+            if ov_cfg["blend"] == "transparent":
+                base_img.paste(ov_img, mask=ov_img.split()[3])
+            else:
+                # 50% blend: dim the overlay's alpha channel
+                r2, g2, b2, a2 = ov_img.split()
+                a2 = a2.point(lambda v: int(v * 0.5))
+                ov_img = Image.merge("RGBA", (r2, g2, b2, a2))
+                base_img = Image.alpha_composite(base_img, ov_img)
+            out = io.BytesIO()
+            base_img.convert("RGB").save(out, format="PNG")
+            return out.getvalue()
+        except Exception:
+            return base_data
 
     # ── internal writers ──────────────────────────────────────────────────────
 
@@ -279,6 +351,8 @@ class DownloadJob:
                             time.sleep(1.0)
 
                 if data:
+                    if self.overlay:
+                        data = self._composite(data, z, x, y)
                     if self.output_format == FMT_LOOSE:
                         self._save_loose(z, x, y, data)
                     elif db_conn is not None:
@@ -380,6 +454,16 @@ class Handler(BaseHTTPRequestHandler):
             ])
             return
 
+        if path == "/api/overlays":
+            self.send_json([
+                {"id": "none", "name": "None", "desc": "No overlay", "blend": "none"},
+            ] + [
+                {"id": k, "name": v["name"], "desc": v["desc"],
+                 "blend": v["blend"], "max_zoom": v["max_zoom"]}
+                for k, v in OVERLAY_SOURCES.items()
+            ])
+            return
+
         if path == "/api/formats":
             self.send_json([
                 {"id": FMT_LOOSE,
@@ -442,6 +526,27 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
 
+        if path.startswith("/overlay/"):
+            parts = path.split("/")
+            try:
+                source = parts[2]
+                z, x = int(parts[3]), int(parts[4])
+                y = int(parts[5].replace(".png", ""))
+            except (IndexError, ValueError):
+                self.send_response(400); self.end_headers(); return
+            ov = OVERLAY_SOURCES.get(source)
+            if not ov:
+                self.send_response(404); self.end_headers(); return
+            url = ov["url"].format(z=z, x=x, y=y)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = r.read()
+                self.send_bytes(data, "image/png")
+            except Exception:
+                self.send_response(404); self.end_headers()
+            return
+
         if path.startswith("/tiles/"):
             parts = path.split("/")
             try:
@@ -498,6 +603,7 @@ class Handler(BaseHTTPRequestHandler):
                     zoom_max=int(body["zoom_max"]),
                     dest_dir=body.get("dest", str(self.ssd_dir)),
                     output_format=body.get("format", FMT_LOOSE),
+                    overlay=body.get("overlay") or None,
                     rate_delay=float(body.get("rate_delay", 0.05)),
                 )
                 # preview always reads from the loose tile directory
