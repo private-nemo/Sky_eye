@@ -150,7 +150,7 @@
   }
   .ov-row:hover { background: var(--surface2); }
   .ov-row.active { background: #0d2140; border-color: var(--accent); }
-  .ov-row input[type=radio] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+  .ov-row input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
   .ov-label { font-size: 12px; font-weight: 600; color: var(--text); }
   .ov-desc  { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
   #overlay-warn { color: var(--yellow); font-size: 11px; margin-top: 4px; display: none; }
@@ -322,13 +322,13 @@ let formats = [];
 let overlays = [];
 let currentSrc = null;
 let selectedFormat = 'loose';
-let selectedOverlay = 'none';
+let selectedOverlays = new Set();
 let destMode = 'ssd';
 let ssdDir = '';
 let sdMounts = [];
 let bboxRect = null;
 let tileLayer = null;
-let overlayLayer = null;
+let overlayLayers = {};
 let drawMode = false;
 let drawStart = null;
 let drawTempRect = null;
@@ -392,14 +392,18 @@ function applySrcInfo() {
 function updateMapLayer() {
   if (previewActive) return;
   if (tileLayer) map.removeLayer(tileLayer);
-  if (overlayLayer) { map.removeLayer(overlayLayer); overlayLayer = null; }
+  // Remove all overlay layers so they re-stack on top of the new base
+  for (const [id, layer] of Object.entries(overlayLayers)) {
+    map.removeLayer(layer);
+    delete overlayLayers[id];
+  }
   const id = document.getElementById('src-select').value;
   tileLayer = L.tileLayer(`/tiles/${id}/{z}/{x}/{y}.png`, {
     attribution: (sources.find(s => s.id === id) || {}).attr || '',
     maxZoom: 19,
     errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
   }).addTo(map);
-  updateOverlayLayer();
+  updateOverlayLayers();
 }
 
 async function loadFormats() {
@@ -432,42 +436,68 @@ function selectFormat(id) {
 async function loadOverlays() {
   const r = await fetch('/api/overlays');
   overlays = await r.json();
+  // filter out the 'none' sentinel — handled by unchecking all boxes
+  const realOverlays = overlays.filter(o => o.id !== 'none');
   const container = document.getElementById('ov-list');
-  overlays.forEach((ov, i) => {
+  if (realOverlays.length === 0) {
+    container.innerHTML = '<div style="font-size:11px;color:var(--muted)">No overlays available</div>';
+    return;
+  }
+  realOverlays.forEach(ov => {
     const row = document.createElement('div');
-    row.className = 'ov-row' + (i === 0 ? ' active' : '');
+    row.className = 'ov-row';
     row.id = `ov-row-${ov.id}`;
     row.innerHTML =
-      `<input type="radio" name="overlay" value="${ov.id}" ${i === 0 ? 'checked' : ''}/>` +
+      `<input type="checkbox" id="ov-cb-${ov.id}" value="${ov.id}"/>` +
       `<div><div class="ov-label">${ov.name}</div>` +
       `<div class="ov-desc">${ov.desc}</div></div>`;
-    row.addEventListener('click', () => selectOverlay(ov.id));
+    row.addEventListener('click', e => {
+      if (e.target.tagName !== 'INPUT') {
+        const cb = document.getElementById(`ov-cb-${ov.id}`);
+        cb.checked = !cb.checked;
+      }
+      toggleOverlay(ov.id);
+    });
     container.appendChild(row);
   });
 }
 
-function selectOverlay(id) {
-  selectedOverlay = id;
-  overlays.forEach(ov => {
-    document.getElementById(`ov-row-${ov.id}`)?.classList.toggle('active', ov.id === id);
-    const radio = document.querySelector(`input[name=overlay][value="${ov.id}"]`);
-    if (radio) radio.checked = (ov.id === id);
-  });
-  updateOverlayLayer();
+function toggleOverlay(id) {
+  const cb = document.getElementById(`ov-cb-${id}`);
+  const row = document.getElementById(`ov-row-${id}`);
+  if (!cb) return;
+  if (cb.checked) {
+    selectedOverlays.add(id);
+    row.classList.add('active');
+  } else {
+    selectedOverlays.delete(id);
+    row.classList.remove('active');
+  }
+  updateOverlayLayers();
 }
 
-function updateOverlayLayer() {
-  if (overlayLayer) { map.removeLayer(overlayLayer); overlayLayer = null; }
-  if (selectedOverlay === 'none' || previewActive) return;
-  const ov = overlays.find(o => o.id === selectedOverlay);
-  if (!ov) return;
-  const opacity = ov.blend === 'transparent' ? 1.0 : 0.5;
-  overlayLayer = L.tileLayer(`/overlay/${selectedOverlay}/{z}/{x}/{y}.png`, {
-    attribution: '',
-    maxZoom: ov.max_zoom || 19,
-    opacity,
-    errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
-  }).addTo(map);
+function updateOverlayLayers() {
+  if (previewActive) return;
+  // Remove layers no longer selected
+  for (const [id, layer] of Object.entries(overlayLayers)) {
+    if (!selectedOverlays.has(id)) {
+      map.removeLayer(layer);
+      delete overlayLayers[id];
+    }
+  }
+  // Add newly selected layers
+  selectedOverlays.forEach(id => {
+    if (overlayLayers[id]) return;
+    const ov = overlays.find(o => o.id === id);
+    if (!ov) return;
+    const opacity = ov.blend === 'transparent' ? 1.0 : 0.5;
+    overlayLayers[id] = L.tileLayer(`/overlay/${id}/{z}/{x}/{y}.png`, {
+      attribution: '',
+      maxZoom: ov.max_zoom || 19,
+      opacity,
+      errorTileUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    }).addTo(map);
+  });
 }
 
 async function loadMounts() {
@@ -747,7 +777,7 @@ async function startDownload() {
     zoom_max: parseInt(document.getElementById('zoom-max').value),
     dest,
     format: selectedFormat,
-    overlay: selectedOverlay !== 'none' ? selectedOverlay : null,
+    overlays: [...selectedOverlays],
   };
   const r = await fetch('/api/download', {
     method: 'POST',
@@ -834,6 +864,10 @@ document.getElementById('preview-btn').addEventListener('click', () => {
     document.getElementById('preview-btn').textContent = '👁 Preview downloaded tiles';
     document.getElementById('map-mode-label').textContent =
       'Draw bounding box or enter coordinates in the sidebar';
+    for (const [id, layer] of Object.entries(overlayLayers)) {
+      map.removeLayer(layer);
+      delete overlayLayers[id];
+    }
     updateMapLayer();
   }
 });

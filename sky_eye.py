@@ -71,7 +71,7 @@ TILE_SOURCES: dict[str, dict] = {
 
 OVERLAY_SOURCES: dict[str, dict] = {
     "openseamap": {
-        "name": "OpenSeaMap (Nautical Marks)",
+        "name": "OpenSeaMap — Nautical Marks",
         "url": "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
         "attr": "© OpenSeaMap contributors",
         "desc": "Buoys, lights, wrecks, depth contours, shipping lanes — global",
@@ -79,10 +79,34 @@ OVERLAY_SOURCES: dict[str, dict] = {
         "max_zoom": 18,
     },
     "osm_streets": {
-        "name": "OSM Street Names & Roads",
+        "name": "OSM Streets & Labels",
         "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         "attr": "© OpenStreetMap contributors",
         "desc": "Road network and place labels blended over base imagery",
+        "blend": "50pct",
+        "max_zoom": 19,
+    },
+    "opentopomap": {
+        "name": "OpenTopoMap — Contours & Terrain",
+        "url": "https://tile.opentopomap.org/{z}/{x}/{y}.png",
+        "attr": "© OpenTopoMap contributors (CC-BY-SA)",
+        "desc": "Topographic contours, elevation shading, terrain — global",
+        "blend": "50pct",
+        "max_zoom": 17,
+    },
+    "usgs_topo": {
+        "name": "USGS Topo (US only)",
+        "url": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}",
+        "attr": "USGS, The National Map",
+        "desc": "Official US topographic map with contours and land cover",
+        "blend": "50pct",
+        "max_zoom": 16,
+    },
+    "esri_topo": {
+        "name": "Esri World Topo",
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "attr": "© Esri, HERE, Garmin, FAO, NOAA, USGS",
+        "desc": "Global topographic map with contours, land cover, and terrain — non-commercial use",
         "blend": "50pct",
         "max_zoom": 19,
     },
@@ -156,12 +180,12 @@ class DownloadJob:
                  zoom_min: int, zoom_max: int,
                  dest_dir: str | Path,
                  output_format: str = FMT_LOOSE,
-                 overlay: str | None = None,
+                 overlays: list[str] | None = None,
                  rate_delay: float = 0.05) -> None:
         self.source = source
         self.dest_dir = Path(dest_dir)
         self.output_format = output_format
-        self.overlay = overlay if overlay and overlay in OVERLAY_SOURCES else None
+        self.overlays = [o for o in (overlays or []) if o in OVERLAY_SOURCES]
         self.zoom_min = zoom_min
         self.zoom_max = zoom_max
         self.rate_delay = rate_delay
@@ -214,35 +238,38 @@ class DownloadJob:
     # ── overlay compositing ───────────────────────────────────────────────────
 
     def _composite(self, base_data: bytes, z: int, x: int, y: int) -> bytes:
-        """Fetch overlay tile and composite it onto base_data. Returns composited PNG bytes."""
-        if not _PILLOW or not self.overlay:
-            return base_data
-        ov_cfg = OVERLAY_SOURCES[self.overlay]
-        url = ov_cfg["url"].format(z=z, x=x, y=y)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                ov_data = r.read()
-        except Exception:
+        """Fetch and composite all active overlay tiles onto base_data in order."""
+        if not _PILLOW or not self.overlays:
             return base_data
         try:
             base_img = Image.open(io.BytesIO(base_data)).convert("RGBA")
-            ov_img   = Image.open(io.BytesIO(ov_data)).convert("RGBA")
-            if ov_img.size != base_img.size:
-                ov_img = ov_img.resize(base_img.size, Image.LANCZOS)
-            if ov_cfg["blend"] == "transparent":
-                base_img.paste(ov_img, mask=ov_img.split()[3])
-            else:
-                # 50% blend: dim the overlay's alpha channel
-                r2, g2, b2, a2 = ov_img.split()
-                a2 = a2.point(lambda v: int(v * 0.5))
-                ov_img = Image.merge("RGBA", (r2, g2, b2, a2))
-                base_img = Image.alpha_composite(base_img, ov_img)
-            out = io.BytesIO()
-            base_img.convert("RGB").save(out, format="PNG")
-            return out.getvalue()
         except Exception:
             return base_data
+        for ov_id in self.overlays:
+            ov_cfg = OVERLAY_SOURCES[ov_id]
+            url = ov_cfg["url"].format(z=z, x=x, y=y)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    ov_data = r.read()
+            except Exception:
+                continue
+            try:
+                ov_img = Image.open(io.BytesIO(ov_data)).convert("RGBA")
+                if ov_img.size != base_img.size:
+                    ov_img = ov_img.resize(base_img.size, Image.LANCZOS)
+                if ov_cfg["blend"] == "transparent":
+                    base_img.paste(ov_img, mask=ov_img.split()[3])
+                else:
+                    r2, g2, b2, a2 = ov_img.split()
+                    a2 = a2.point(lambda v: int(v * 0.5))
+                    ov_img = Image.merge("RGBA", (r2, g2, b2, a2))
+                    base_img = Image.alpha_composite(base_img, ov_img)
+            except Exception:
+                continue
+        out = io.BytesIO()
+        base_img.convert("RGB").save(out, format="PNG")
+        return out.getvalue()
 
     # ── internal writers ──────────────────────────────────────────────────────
 
@@ -351,7 +378,7 @@ class DownloadJob:
                             time.sleep(1.0)
 
                 if data:
-                    if self.overlay:
+                    if self.overlays:
                         data = self._composite(data, z, x, y)
                     if self.output_format == FMT_LOOSE:
                         self._save_loose(z, x, y, data)
@@ -603,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
                     zoom_max=int(body["zoom_max"]),
                     dest_dir=body.get("dest", str(self.ssd_dir)),
                     output_format=body.get("format", FMT_LOOSE),
-                    overlay=body.get("overlay") or None,
+                    overlays=body.get("overlays") or [],
                     rate_delay=float(body.get("rate_delay", 0.05)),
                 )
                 # preview always reads from the loose tile directory
