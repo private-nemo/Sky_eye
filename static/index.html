@@ -287,7 +287,7 @@
   <!-- ── MAP PANEL ── -->
   <div id="map-panel">
     <div id="map-toolbar">
-      <span id="map-mode-label">Draw bounding box or enter coordinates in the sidebar</span>
+      <span id="map-mode-label">Right-click drag to draw bbox · or use ✏ Draw BBox for left-click mode</span>
       <button class="btn btn-ghost" id="draw-btn" style="margin-left:auto">✏ Draw BBox</button>
     </div>
     <div id="map"></div>
@@ -531,7 +531,56 @@ map.on('mouseup', e => {
   map.dragging.enable();
   map.getContainer().style.cursor = '';
   document.getElementById('map-mode-label').textContent =
-    'Draw bounding box or enter coordinates in the sidebar';
+    'Right-click drag to draw bbox · or use ✏ Draw BBox for left-click mode';
+});
+
+// ── right-click drag to draw bbox (always active, no button needed) ───────────
+let rcStart = null;
+let rcTempRect = null;
+let rcDragging = false;
+
+// Suppress browser context menu while right-click dragging
+map.getContainer().addEventListener('contextmenu', e => {
+  if (rcDragging) e.preventDefault();
+});
+
+map.on('mousedown', e => {
+  if (e.originalEvent.button !== 2) return;
+  L.DomEvent.stop(e);
+  map.dragging.disable();
+  rcStart = e.latlng;
+  rcDragging = false;
+  if (rcTempRect) { map.removeLayer(rcTempRect); rcTempRect = null; }
+});
+
+map.on('mousemove', e => {
+  if (!rcStart) return;
+  rcDragging = true;
+  const bounds = L.latLngBounds(rcStart, e.latlng);
+  if (rcTempRect) {
+    rcTempRect.setBounds(bounds);
+  } else {
+    rcTempRect = L.rectangle(bounds, {
+      color: '#e3a45a', weight: 2, fillOpacity: 0.12, dashArray: '4 3',
+    }).addTo(map);
+  }
+});
+
+map.on('mouseup', e => {
+  if (e.originalEvent.button !== 2 || !rcStart) return;
+  map.dragging.enable();
+  if (rcDragging && rcTempRect) {
+    const bounds = L.latLngBounds(rcStart, e.latlng);
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+    if (rcTempRect) { map.removeLayer(rcTempRect); rcTempRect = null; }
+    setCoords(sw.lat, ne.lat, sw.lng, ne.lng);
+  } else if (rcTempRect) {
+    map.removeLayer(rcTempRect);
+    rcTempRect = null;
+  }
+  rcStart = null;
+  rcDragging = false;
 });
 
 // ── estimate ──────────────────────────────────────────────────────────────────
