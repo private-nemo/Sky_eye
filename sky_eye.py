@@ -25,7 +25,16 @@ try:
     from PIL import Image
     _PILLOW = True
 except ImportError:
-    _PILLOW = False
+    import subprocess
+    print("[sky_eye] Pillow not found — installing…")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "Pillow"])
+        from PIL import Image
+        _PILLOW = True
+        print("[sky_eye] Pillow installed.")
+    except Exception as _pip_err:
+        print(f"[sky_eye] Pillow auto-install failed: {_pip_err}. Overlay compositing and JNX export will be unavailable.")
+        _PILLOW = False
 
 # ── tile source registry ──────────────────────────────────────────────────────
 
