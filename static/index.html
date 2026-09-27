@@ -4,8 +4,8 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Sky Eye Tile Generator</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/leaflet.css"/>
+<script src="/leaflet.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -257,14 +257,15 @@
       <div id="dest-ssd" class="radio-row active" onclick="selectDest('ssd')">
         <input type="radio" name="dest" value="ssd" checked/>
         <div>
-          <div class="radio-label">💾 SSD — Laptop</div>
+          <div class="radio-label" id="ssd-label">💾 SSD — Laptop</div>
           <div class="radio-sub" id="ssd-path">~/tiles/sky_eye</div>
         </div>
+        <span class="radio-badge" id="ssd-badge" style="display:none">—</span>
       </div>
       <div id="dest-sd" class="radio-row" onclick="selectDest('sd')">
         <input type="radio" name="dest" value="sd"/>
         <div>
-          <div class="radio-label">📱 SD Card</div>
+          <div class="radio-label" id="sd-label">🔌 OTG SD Card</div>
           <div class="radio-sub" id="sd-path">Checking…</div>
         </div>
         <span class="radio-badge" id="sd-badge">—</span>
@@ -504,8 +505,30 @@ async function loadMounts() {
   const r = await fetch('/api/mounts');
   const d = await r.json();
   ssdDir = d.ssd_dir;
-  document.getElementById('ssd-path').textContent = ssdDir;
   sdMounts = d.mounts;
+
+  const isAndroid = d.platform === 'android';
+
+  if (isAndroid) {
+    // Internal storage option
+    document.getElementById('ssd-label').textContent = '📱 Internal Storage';
+    const internalPath = d.internal_path || ssdDir;
+    document.getElementById('ssd-path').textContent = internalPath;
+    ssdDir = internalPath;
+    const ssdBadge = document.getElementById('ssd-badge');
+    if (d.internal_free_gb > 0) {
+      ssdBadge.textContent = d.internal_free_gb + ' GB free';
+      ssdBadge.style.color = 'var(--green)';
+      ssdBadge.style.display = '';
+    }
+    // OTG option
+    document.getElementById('sd-label').textContent = '🔌 OTG SD Card';
+  } else {
+    document.getElementById('ssd-label').textContent = '💾 SSD — Laptop';
+    document.getElementById('ssd-path').textContent = ssdDir;
+    document.getElementById('sd-label').textContent = '📱 SD Card';
+  }
+
   const sdPath = document.getElementById('sd-path');
   const sdBadge = document.getElementById('sd-badge');
   if (sdMounts.length > 0) {
@@ -513,7 +536,7 @@ async function loadMounts() {
     sdBadge.textContent = sdMounts[0].free_gb + ' GB free';
     sdBadge.style.color = 'var(--green)';
   } else {
-    sdPath.textContent = 'No SD card detected';
+    sdPath.textContent = isAndroid ? 'No OTG drive detected' : 'No SD card detected';
     sdBadge.textContent = 'Not found';
     document.getElementById('dest-sd').style.opacity = '0.5';
   }

@@ -80,6 +80,14 @@ TILE_SOURCES: dict[str, dict] = {
 # ── overlay source registry ───────────────────────────────────────────────────
 
 OVERLAY_SOURCES: dict[str, dict] = {
+    "noaa_charts": {
+        "name": "NOAA Nautical Charts (US)",
+        "url": "https://tileservice.charts.noaa.gov/tiles/50000_1/{z}/{x}/{y}.png",
+        "attr": "NOAA, Office of Coast Survey",
+        "desc": "Official US nautical charts — depth soundings, hazards, channels, port plans",
+        "blend": "transparent",
+        "max_zoom": 17,
+    },
     "openseamap": {
         "name": "OpenSeaMap — Nautical Marks",
         "url": "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
@@ -370,7 +378,7 @@ class DownloadJob:
             url = ov_cfg["url"].format(z=z, x=x, y=y)
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
-                with urllib.request.urlopen(req, timeout=8) as r:
+                with urllib.request.urlopen(req, timeout=8, context=_tile_ssl_ctx) as r:
                     ov_data = r.read()
             except Exception:
                 continue
@@ -496,7 +504,7 @@ class DownloadJob:
                     try:
                         req = urllib.request.Request(
                             url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
-                        with urllib.request.urlopen(req, timeout=10) as r:
+                        with urllib.request.urlopen(req, timeout=10, context=_tile_ssl_ctx) as r:
                             data = r.read()
                         break
                     except Exception:
@@ -553,6 +561,15 @@ _tile_cache: dict[str, bytes] = {}
 _tile_lock = threading.Lock()
 _preview_dir: Path | None = None
 
+# Android doesn't bundle CA certs; disable verification for public tile CDNs.
+try:
+    import ssl as _ssl
+    _tile_ssl_ctx: "_ssl.SSLContext | None" = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+    _tile_ssl_ctx.check_hostname = False
+    _tile_ssl_ctx.verify_mode = _ssl.CERT_NONE
+except Exception:
+    _tile_ssl_ctx = None
+
 
 def fetch_remote_tile(z: int, x: int, y: int, source: str) -> bytes | None:
     src = TILE_SOURCES.get(source, TILE_SOURCES["esri"])
@@ -563,7 +580,7 @@ def fetch_remote_tile(z: int, x: int, y: int, source: str) -> bytes | None:
             return _tile_cache[key]
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with urllib.request.urlopen(req, timeout=8, context=_tile_ssl_ctx) as r:
             data = r.read()
         with _tile_lock:
             if len(_tile_cache) < 3000:
@@ -581,6 +598,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 class Handler(BaseHTTPRequestHandler):
     current_job: DownloadJob | None = None
     ssd_dir: Path = DEFAULT_SSD_DIR
+    android_mounts: list | None = None  # set by android/main.py; None = desktop
 
     def log_message(self, fmt, *args):
         pass
@@ -668,10 +686,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/mounts":
-            self.send_json({
-                "ssd_dir": str(self.ssd_dir),
-                "mounts": find_removable_mounts(),
-            })
+            if Handler.android_mounts is not None:
+                internal = next((m for m in Handler.android_mounts if m["kind"] == "internal"), None)
+                otg = [m for m in Handler.android_mounts if m["kind"] == "otg"]
+                self.send_json({
+                    "ssd_dir": str(Handler.ssd_dir),
+                    "mounts": otg,
+                    "platform": "android",
+                    "internal_path": internal["path"] if internal else str(Handler.ssd_dir),
+                    "internal_free_gb": internal["free_gb"] if internal else 0.0,
+                })
+            else:
+                self.send_json({
+                    "ssd_dir": str(Handler.ssd_dir),
+                    "mounts": find_removable_mounts(),
+                    "platform": "desktop",
+                })
             return
 
         if path == "/api/progress":
@@ -710,7 +740,7 @@ class Handler(BaseHTTPRequestHandler):
             url = ov["url"].format(z=z, x=x, y=y)
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "SkyEye-TileGen/1.0"})
-                with urllib.request.urlopen(req, timeout=8) as r:
+                with urllib.request.urlopen(req, timeout=8, context=_tile_ssl_ctx) as r:
                     data = r.read()
                 self.send_bytes(data, "image/png")
             except Exception:
@@ -774,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
                     lon_max=float(body["lon_max"]),
                     zoom_min=int(body["zoom_min"]),
                     zoom_max=int(body["zoom_max"]),
-                    dest_dir=body.get("dest", str(self.ssd_dir)),
+                    dest_dir=body.get("dest", str(Handler.ssd_dir)),
                     output_format=body.get("format", FMT_LOOSE),
                     overlays=body.get("overlays") or [],
                     rate_delay=float(body.get("rate_delay", 0.05)),
